@@ -16,7 +16,8 @@ passwords, signatures, or authenticity checks.
 1. `frame::build_final_blocks` is the only production padding builder.
 2. `consts` owns the RFC constants and message schedule.
 3. `backend::compress_block` selects the single-stream compressor.
-4. `simd::hash_many_dispatch` schedules one-shot batches and
+4. `simd::hash_many_dispatch` schedules one-shot batches (fused equal runs,
+   then the lane-refill scheduler for the rest) and
    `simd::update_many_dispatch` schedules incremental ones; `wide::hash_equal_wide`
    and `wide::update_equal_wide` share `wide::compress_full_blocks`, the only SIMD
    full-block loop. Keep ISA-specific operations in their adapters.

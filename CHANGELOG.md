@@ -19,8 +19,17 @@
   ABBA of `hash_many_equal_16/1048576` before and after the extraction:
   1.005× on Apple Silicon, 1.001× on i7-9700 (no change).
 
+- `hash_many`: messages outside an equal-length run no longer fall to the
+  single-stream backend one by one; they share SIMD lanes through a refill
+  scheduler (no sorting, no allocation, output order preserved). Same-host ABBA
+  vs sequential `md-5` on Apple Silicon: 6.07× for 256 objects of 1–64 KiB with
+  no two equal, 4.83× for 2000 of 100–1500 B, 1.50× on `object_mix_irregular`
+  (1.013× before). Fused equal-length runs unchanged (0.995×–1.011×).
+
 ### Validation
 
+- Added `tests/hash_many_mixed.rs` and the `mixed_256x1..64KiB` /
+  `mixed_2000x100..1500B` schedules to the `hash_many_schedules` benchmark.
 - Added `tests/update_many.rs`: lockstep, near-equal, stalled/short, arbitrary
   chunking, more streams than one scheduling window, and mixed single/batch
   updates, all against RustCrypto `md-5`.

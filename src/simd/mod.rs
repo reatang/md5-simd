@@ -13,6 +13,9 @@
 //! groups (see `docs/performance.md`).
 
 use crate::backend;
+use crate::compress::state_to_bytes;
+use crate::core::Raw;
+use crate::frame::build_final_blocks;
 use crate::multibuf;
 use crate::state::Md5State;
 const MAX_GROUPS: usize = 4;
@@ -127,6 +130,10 @@ pub fn hash_many_dispatch(inputs: &[&[u8]], outputs: &mut [[u8; 16]]) {
         return;
     }
 
+    // Messages that no equal-length run can fuse are not hashed one by one:
+    // they share lanes through the refill scheduler. It is built on first use
+    // only; its lane table is ~11 KiB, which a small fused batch must not pay.
+    let mut refill: Option<Refill<'_>> = None;
     let mut i = 0;
     while i < inputs.len() {
         let len0 = inputs[i].len();
@@ -140,7 +147,9 @@ pub fn hash_many_dispatch(inputs: &[&[u8]], outputs: &mut [[u8; 16]]) {
             let left = run - done;
             let batch = pick_batch(left, max, len0);
             if batch == 0 {
-                outputs[i + done] = backend::hash(inputs[i + done]);
+                refill
+                    .get_or_insert_with(|| Refill::new(inputs, max))
+                    .push(i + done, outputs);
                 done += 1;
             } else {
                 platform::hash_equal_n(
@@ -152,6 +161,170 @@ pub fn hash_many_dispatch(inputs: &[&[u8]], outputs: &mut [[u8; 16]]) {
             }
         }
         i += run;
+    }
+    if let Some(refill) = refill.as_mut() {
+        refill.drain(outputs);
+    }
+}
+
+/// One lane of the refill scheduler: where a message is in its full blocks,
+/// or in its one or two padding blocks.
+#[derive(Clone, Copy)]
+struct Lane {
+    live: bool,
+    index: usize,
+    offset: usize,
+    chain: [u32; 4],
+    pad: [[u8; 64]; 2],
+    pad_blocks: usize,
+    pad_done: usize,
+}
+
+impl Lane {
+    const FREE: Lane = Lane {
+        live: false,
+        index: 0,
+        offset: 0,
+        chain: crate::consts::STATE_INIT,
+        pad: [[0u8; 64]; 2],
+        pad_blocks: 0,
+        pad_done: 0,
+    };
+
+    /// The bytes still to be compressed: message blocks, then padding blocks.
+    fn data<'a>(&'a self, inputs: &[&'a [u8]]) -> &'a [u8] {
+        if self.pad_blocks == 0 {
+            &inputs[self.index][self.offset..]
+        } else {
+            &self.pad.as_flattened()[self.pad_done * 64..self.pad_blocks * 64]
+        }
+    }
+
+    /// Once fewer than 64 message bytes remain, build the padding blocks.
+    fn enter_padding_if_short(&mut self, inputs: &[&[u8]]) {
+        let input = inputs[self.index];
+        if self.pad_blocks == 0 && input.len() - self.offset < 64 {
+            self.pad_blocks =
+                build_final_blocks(input.len() as u64, &input[self.offset..], &mut self.pad);
+        }
+    }
+}
+
+/// Shares SIMD lanes between messages of unequal lengths.
+///
+/// Up to one window of lanes each hold a message. Every round compresses the
+/// number of blocks all occupied lanes still have in common; a lane whose message
+/// runs out goes through its padding blocks in the same way and is then refilled
+/// with the next message. Lanes stay full until the queue drains, without
+/// sorting the inputs, allocating, or reordering outputs. Messages left in fewer
+/// than four lanes at the end are finished on the single-stream backend.
+struct Refill<'a> {
+    inputs: &'a [&'a [u8]],
+    lanes: [Lane; MAX_BATCH],
+    width: usize,
+    max: usize,
+}
+
+impl<'a> Refill<'a> {
+    fn new(inputs: &'a [&'a [u8]], max: usize) -> Self {
+        Self {
+            inputs,
+            lanes: [Lane::FREE; MAX_BATCH],
+            width: max * update_groups_per_window(),
+            max,
+        }
+    }
+
+    /// Give message `index` a lane, running rounds until one is free.
+    fn push(&mut self, index: usize, outputs: &mut [[u8; 16]]) {
+        let slot = loop {
+            if let Some(slot) = self.lanes[..self.width].iter().position(|lane| !lane.live) {
+                break slot;
+            }
+            self.round(outputs);
+        };
+        self.lanes[slot] = Lane {
+            live: true,
+            index,
+            ..Lane::FREE
+        };
+        self.lanes[slot].enter_padding_if_short(self.inputs);
+    }
+
+    /// Hash whatever is still in the lanes.
+    fn drain(&mut self, outputs: &mut [[u8; 16]]) {
+        while self.lanes[..self.width].iter().any(|lane| lane.live) {
+            if !self.round(outputs) {
+                for slot in 0..self.width {
+                    if self.lanes[slot].live {
+                        self.finish_scalar(slot, outputs);
+                    }
+                }
+            }
+        }
+    }
+
+    /// One SIMD round over the occupied lanes. `false` when too few lanes are
+    /// occupied for a SIMD batch (or no kernel is usable), leaving them untouched.
+    fn round(&mut self, outputs: &mut [[u8; 16]]) -> bool {
+        let mut live = [0usize; MAX_BATCH];
+        let mut n = 0;
+        let mut nblocks = usize::MAX;
+        for slot in 0..self.width {
+            let lane = &self.lanes[slot];
+            if lane.live {
+                live[n] = slot;
+                n += 1;
+                nblocks = nblocks.min(lane.data(self.inputs).len() / 64);
+            }
+        }
+        // Every live lane holds at least one block: its message's, or its padding's.
+        debug_assert!(n == 0 || nblocks >= 1);
+        if pick_batch(n, self.max, 64) == 0 {
+            return false;
+        }
+
+        let mut chain = [[0u32; 4]; MAX_BATCH];
+        let mut blocks: [&[u8]; MAX_BATCH] = [&[]; MAX_BATCH];
+        for (i, &slot) in live[..n].iter().enumerate() {
+            chain[i] = self.lanes[slot].chain;
+            blocks[i] = self.lanes[slot].data(self.inputs);
+        }
+        if !platform::update_equal_n(&mut chain[..n], &blocks[..n], nblocks) {
+            return false;
+        }
+        for (i, &slot) in live[..n].iter().enumerate() {
+            let lane = &mut self.lanes[slot];
+            lane.chain = chain[i];
+            if lane.pad_blocks == 0 {
+                lane.offset += nblocks * 64;
+                lane.enter_padding_if_short(self.inputs);
+            } else {
+                lane.pad_done += nblocks;
+                if lane.pad_done == lane.pad_blocks {
+                    outputs[lane.index] = state_to_bytes(lane.chain);
+                    lane.live = false;
+                }
+            }
+        }
+        true
+    }
+
+    fn finish_scalar(&mut self, slot: usize, outputs: &mut [[u8; 16]]) {
+        let lane = &mut self.lanes[slot];
+        let digest = if lane.pad_blocks == 0 {
+            let mut raw = Raw::from_parts(lane.chain, lane.offset as u64);
+            raw.update_opt(&self.inputs[lane.index][lane.offset..]);
+            raw.digest_snapshot(backend::compress_block)
+        } else {
+            let mut chain = lane.chain;
+            for block in &lane.pad[lane.pad_done..lane.pad_blocks] {
+                backend::compress_block(&mut chain, block);
+            }
+            state_to_bytes(chain)
+        };
+        outputs[lane.index] = digest;
+        lane.live = false;
     }
 }
 

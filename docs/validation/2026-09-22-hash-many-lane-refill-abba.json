@@ -1,0 +1,119 @@
+{
+  "date": "2026-09-22",
+  "scope": "hash_many lane-refill scheduler for messages outside equal-length runs",
+  "method": {
+    "order": "A1,B1,B2,A2",
+    "rounds_per_cell": 3,
+    "samples_per_round": 20,
+    "measurement_seconds": 3,
+    "warmup_seconds": 1,
+    "cooldown_seconds": 2,
+    "drift_limit": 0.03
+  },
+  "runs": [
+    {
+      "target": "aarch64-apple-darwin",
+      "host": "Apple Silicon",
+      "workload": "hash_many_schedules/object_mix_irregular/4399104",
+      "baseline": "sequential md-5",
+      "candidate": "hash_many (fused runs + lane refill)",
+      "cells_ns": {
+        "A1": 4650038.4140625,
+        "B1": 3104256.244078947,
+        "B2": 3101955.8175824173,
+        "A2": 4644083.520833334
+      },
+      "baseline_drift": 0.0012806116205744678,
+      "candidate_variation": 0.0007410556074156638,
+      "accepted_stability": true,
+      "baseline_over_candidate": 1.497551460142639
+    },
+    {
+      "target": "aarch64-apple-darwin",
+      "host": "Apple Silicon",
+      "workload": "hash_many_schedules/mixed_256x1..64KiB/8745032",
+      "baseline": "sequential md-5",
+      "candidate": "hash_many (lane refill; no equal run exists)",
+      "cells_ns": {
+        "A1": 9280812.744318182,
+        "B1": 1529364.6881249999,
+        "B2": 1534701.450793651,
+        "A2": 9311251.215625
+      },
+      "baseline_drift": 0.00327972044532987,
+      "candidate_variation": 0.0034895291555305796,
+      "accepted_stability": true,
+      "baseline_over_candidate": 6.067775014316292
+    },
+    {
+      "target": "aarch64-apple-darwin",
+      "host": "Apple Silicon",
+      "workload": "hash_many_schedules/mixed_2000x100..1500B/2902557",
+      "baseline": "sequential md-5",
+      "candidate": "hash_many (lane refill; no equal run exists)",
+      "cells_ns": {
+        "A1": 3162027.0300000003,
+        "B1": 652073.9575757575,
+        "B2": 649907.5151515151,
+        "A2": 3125531.324242424
+      },
+      "baseline_drift": 0.0115418702659148,
+      "candidate_variation": 0.003322387589740017,
+      "accepted_stability": true,
+      "baseline_over_candidate": 4.8292226010496275
+    },
+    {
+      "target": "aarch64-apple-darwin",
+      "host": "Apple Silicon",
+      "workload": "hash_many_equal_16/1048576",
+      "baseline": "commit a202406 binary",
+      "candidate": "this change, same benchmark id",
+      "cells_ns": {
+        "A1": 4205501.575,
+        "B1": 4199959.11875,
+        "B2": 4182385.7767857146,
+        "A2": 4270934.298214287
+      },
+      "baseline_drift": 0.015558839307838523,
+      "candidate_variation": 0.004184169766279999,
+      "accepted_stability": true,
+      "baseline_over_candidate": 1.0112248993391673
+    },
+    {
+      "target": "aarch64-apple-darwin",
+      "host": "Apple Silicon",
+      "workload": "hash_many_equal_8/64",
+      "baseline": "commit a202406 binary",
+      "candidate": "this change, same benchmark id (refill built lazily)",
+      "cells_ns": {
+        "A1": 388.90733134865945,
+        "B1": 389.84621888210427,
+        "B2": 388.6265701721311,
+        "A2": 385.89426661611714
+      },
+      "baseline_drift": 0.007747513326872957,
+      "candidate_variation": 0.003128538000113368,
+      "accepted_stability": true,
+      "baseline_over_candidate": 0.9952841112225401
+    },
+    {
+      "target": "aarch64-apple-darwin",
+      "host": "Apple Silicon",
+      "workload": "hash_many_equal_8/1024",
+      "baseline": "commit a202406 binary",
+      "candidate": "this change, same benchmark id",
+      "cells_ns": {
+        "A1": 2998.526379151618,
+        "B1": 2977.3815855115236,
+        "B2": 2969.5352747472825,
+        "A2": 2984.2629038529512
+      },
+      "baseline_drift": 0.004756828353366882,
+      "candidate_variation": 0.002635305733877935,
+      "accepted_stability": true,
+      "baseline_over_candidate": 1.0060321042968476
+    }
+  ],
+  "not_covered": "x86_64 native runs pending (host unavailable at the time); x86_64 cross-check compiled. AVX-512 not executed.",
+  "conclusion": "Accepted. Messages that no equal-length run can fuse now share SIMD lanes: 4.8-6.1x over sequential md-5 on never-repeating lengths, 1.50x on the object_mix_irregular schedule that measured 1.013x before. Fused equal-length runs are unchanged (0.995x-1.011x)."
+}

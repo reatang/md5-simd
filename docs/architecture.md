@@ -76,7 +76,18 @@ loop `hash_equal_wide` enters from the IV — and stores them back. It applies n
 padding and reads exactly `nblocks × 64` bytes per stream.
 
 `hash_many_dispatch` validates output capacity and groups adjacent equal-length
-inputs without allocation or reordering. The `std`-only `Md5Engine::hash_many_grouped`
+inputs without allocation or reordering. Messages that `pick_batch` would send
+to the single-stream backend go to the lane-refill scheduler (`Refill`)
+instead. It keeps one window of lanes (`lanes × groups per window`, ~11 KiB on
+the stack, built only when a message needs it); each lane holds one message's
+chaining value and position, or its one or two padding blocks. `push` takes a
+free lane, running rounds until one frees; a round finds the block count all
+occupied lanes have in common and advances them through
+`platform::update_equal_n`, then a lane whose message ended builds its padding
+with `build_final_blocks` and, once that is compressed, writes the digest at the
+message's own index and frees. `drain` at the end finishes the lanes that are
+left below the SIMD threshold on the single-stream backend. Outputs are written
+by index, so order is preserved without a scatter pass. The `std`-only `Md5Engine::hash_many_grouped`
 entry point is an explicit scheduler option: it sorts temporary indices by
 length, dispatches grouped runs, and scatters results back to original order.
 `platform` chooses an available ISA.

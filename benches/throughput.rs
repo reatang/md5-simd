@@ -303,8 +303,24 @@ fn bench_hash_many_schedules(c: &mut Criterion) {
         ),
     ];
 
+    // Lengths that never repeat: no equal-length run of any size, so nothing
+    // for the fused path or `hash_many_grouped` to work with.
+    let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = move || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x as usize
+    };
+    let mixed_small: Vec<usize> = (0..2000).map(|i| 100 + i + next() % 700).collect();
+    let mixed_objects: Vec<usize> = (0..256).map(|i| 1024 + i + next() % (64 * 1024)).collect();
+    let generated: [(&str, &[usize]); 2] = [
+        ("mixed_2000x100..1500B", &mixed_small),
+        ("mixed_256x1..64KiB", &mixed_objects),
+    ];
+
     let mut group = c.benchmark_group("hash_many_schedules");
-    for &(name, lengths) in schedules {
+    for &(name, lengths) in schedules.iter().chain(&generated) {
         let storage: Vec<Vec<u8>> = lengths
             .iter()
             .enumerate()

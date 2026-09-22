@@ -118,17 +118,20 @@ Md5Engine::new().hash_many(&inputs, &mut outputs);
 assert!(outputs.iter().all(|out| *out == digest(&messages[0])));
 ```
 
-`hash_many` preserves input order and processes contiguous equal-length runs.
-Runs with at least four messages of at least 32 bytes can use SIMD; small runs,
-short messages, and unsupported targets use the active single-stream backend.
-Inputs need no special alignment. The caller supplies output storage, and the
-byte batch API performs no heap allocation or thread spawning.
+`hash_many` preserves input order and performs no heap allocation. Contiguous
+equal-length runs of at least four messages (at least 32 bytes each) go through
+the fused SIMD kernel. Every other message shares SIMD lanes through a refill
+scheduler: lanes hold messages of any length, each round compresses the blocks
+the occupied lanes have in common, and a lane whose message ends runs its padding
+and takes the next message. Messages left in fewer than four lanes at the end,
+and unsupported targets, use the active single-stream backend. Inputs need no
+special alignment.
 
-When an object scheduler has non-adjacent equal-size messages, the `std`
-feature also provides `Md5Engine::hash_many_grouped`. It sorts internal indices
-by message length, runs the same SIMD dispatcher, and scatters digests back to
-the original order. This method allocates temporary indices and digest storage;
-use it only when the expected SIMD work outweighs that scheduling cost.
+`Md5Engine::hash_many_grouped` (`std`) sorts non-adjacent equal-size messages
+into runs for the fused kernel and scatters digests back to the original order.
+It predates the refill scheduler and allocates temporary indices; with the
+refill scheduler `hash_many` already handles such inputs without sorting, so
+prefer `hash_many` unless a measurement says otherwise.
 
 | Target | Batch selection with `simd` |
 | --- | --- |

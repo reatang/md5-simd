@@ -520,6 +520,32 @@ streams and **1.173×** at 32 (both accepted); 16 streams went from 4.69× to 5.
 over sequential updates. aarch64 interleaves the chains of several groups and
 keeps the four-group window.
 
+## Mixed lengths in `hash_many` (lane refill)
+
+Before this change, a message outside an equal-length run of four or more was
+hashed on its own, so batches of distinct object sizes ran at single-stream
+speed (the `object_mix_irregular` schedule measured 1.013×). The refill
+scheduler lets such messages share lanes. Baseline is sequential RustCrypto
+`md-5`; the fused equal-length path is unchanged.
+
+| Host | Workload | baseline / candidate | Stability |
+| --- | --- | ---: | --- |
+| Apple Silicon, NEON8 | `object_mix_irregular` (14 objects, 8 KiB–1 MiB, 4.4 MB) | **1.50×** | accepted |
+| Apple Silicon, NEON8 | 256 × 1–64 KiB, no two equal | **6.07×** | accepted |
+| Apple Silicon, NEON8 | 2000 × 100–1500 B, no two equal | **4.83×** | accepted |
+| Apple Silicon, NEON8 | `hash_many_equal_16/1 MiB`, before/after | 1.011× | accepted |
+| Apple Silicon, NEON8 | `hash_many_equal_8/64 B`, before/after | 0.995× | accepted |
+| Apple Silicon, NEON8 | `hash_many_equal_8/1 KiB`, before/after | 1.006× | accepted |
+
+`object_mix_irregular` gains less than the generated shapes because it has only
+14 messages and two of them are 1 MiB: once the queue is empty those two are
+alone in their lanes and finish single-stream, which is inherent to MD5 (one
+message cannot be split across lanes). The first version built the lane table on
+every call and cost the 8 × 64 B fused batch 38%; it is now built on first use.
+
+Evidence: `docs/validation/2026-09-22-hash-many-lane-refill-abba.json`.
+x86_64 native runs are pending.
+
 `examples/streaming_uploads.rs` drives a server-shaped workload (192 uploads of
 2–6 MiB plus some tiny ones, 256 KiB chunks, periodic stalls, uploads admitted and
 retired as they complete) and checks every digest:
